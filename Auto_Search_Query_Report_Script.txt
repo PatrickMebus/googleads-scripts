@@ -1,0 +1,196 @@
+var SPREADSHEET_URL = 'YOUR_SPREADSHEET_URL';
+
+// Please fix the following variables if you need to reformat the spreadsheet
+// column numbers of each config column. Column A in your spreadsheet has
+// column number of 1, B has number of 2, etc.
+var COLUMN = {
+  accountId: 2,
+  impressionsThreshold: 3,
+  averageCpcThreshold: 4,
+  ctrThreshold: 5,
+  costPerConvThreshold: 6
+};
+
+// Start row/column numbers and total columns of actual config
+// (without header and margin)
+var CONFIG = {
+  startRow: 6,
+  startColumn: 2,
+  totalColumns: 5
+};
+
+// One currency unit is one million micro amount.
+var MICRO_AMOUNT_MULTIPLIER = 1000000;
+
+/**
+ * Configuration to be used for running reports.
+ */
+var REPORTING_OPTIONS = {
+  // Comment out the following line to default to the latest reporting version.
+  apiVersion: 'v201802'
+};
+
+function main() {
+  // Read config data from the spreadsheet
+  Logger.log('Using spreadsheet - %s.', SPREADSHEET_URL);
+  var spreadsheet = validateAndGetSpreadsheet(SPREADSHEET_URL);
+
+  // Make sure the spreadsheet is using the account's timezone.
+  spreadsheet.setSpreadsheetTimeZone(AdsApp.currentAccount().getTimeZone());
+  var sheet = spreadsheet.getSheets()[0];
+
+  var endRow = sheet.getLastRow();
+  var rows = endRow - CONFIG.startRow + 1;
+  var config = [];
+  if (rows > 0) {
+    config = sheet.getRange(CONFIG.startRow, CONFIG.startColumn,
+               rows, CONFIG.totalColumns).getValues();
+  }
+  else {
+    Logger.log('Empty config, abort!');
+    return;
+  }
+
+  var mccAccount = AdsApp.currentAccount();
+  sheet.getRange(2, 6).setValue(mccAccount.getCustomerId());
+
+  var accountIterator = AdsManagerApp.accounts().get();
+  while (accountIterator.hasNext()) {
+    var account = accountIterator.next();
+    processAccount(account, config);
+  }
+
+  // Update "Last execution" timestamp
+  var today = new Date();
+  sheet.getRange(1, 3).setValue(today);
+  AdsManagerApp.select(mccAccount);
+}
+
+// Core logic for processing each account
+function processAccount(account, config) {
+  // Swith to current adwords account
+  AdsManagerApp.select(account);
+  var accountId = account.getCustomerId();
+
+  var accountIdCol = COLUMN.accountId - CONFIG.startColumn;
+  var impsThrshCol = COLUMN.impressionsThreshold - CONFIG.startColumn;
+  var avgCpcThrshCol = COLUMN.averageCpcThreshold - CONFIG.startColumn;
+  var ctrThrshCol = COLUMN.ctrThreshold - CONFIG.startColumn;
+  var costPerConvThrshCol = COLUMN.costPerConvThreshold - CONFIG.startColumn;
+
+  // Get config for this account, if not found use default entry,
+  // if no default entry just skip
+  var configIndex = -1;
+  var hasDefault = (config[0][accountIdCol].toLowerCase() == 'default');
+  var configStartRow = hasDefault ? 1 : 0;
+  for (var i = configStartRow; i < config.length; i++) {
+    if (config[i][accountIdCol] === accountId) {
+      configIndex = i;
+      break;
+    }
+  }
+
+  if (configIndex == -1) {
+    if (hasDefault) {
+      Logger.log('Processing account %s with default config.', accountId);
+      configIndex = 0;
+    }
+    else {
+      Logger.log('Skipping account %s: no config found.', accountId);
+      return;
+    }
+  }
+  else {
+    Logger.log('Processing account %s with account-specific config.',
+               accountId);
+  }
+
+  var impsThrsh = config[configIndex][impsThrshCol];
+  var avgCpcThrsh = config[configIndex][avgCpcThrshCol];
+  var ctrThrsh = config[configIndex][ctrThrshCol];
+  var costPerConvThrsh = config[configIndex][costPerConvThrshCol];
+
+  var report = AdsApp.report(
+      'SELECT Query, Clicks, Cost, Ctr, ConversionRate,' +
+      ' CostPerConversion, Conversions, CampaignId, AdGroupId' +
+      ' FROM SEARCH_QUERY_PERFORMANCE_REPORT' +
+      ' WHERE ' +
+          ' Conversions > 0' +
+          ' AND Impressions > ' + impsThrsh +
+          ' AND AverageCpc > ' + (avgCpcThrsh * MICRO_AMOUNT_MULTIPLIER) +
+      ' DURING LAST_7_DAYS', REPORTING_OPTIONS);
+  var rows = report.rows();
+
+  var negativeKeywords = {};
+  var positiveKeywords = {};
+  var allAdGroupIds = {};
+  // Iterate through search query and decide whether to add them as positive
+  // or negative keywords (or ignore).
+  while (rows.hasNext()) {
+    var row = rows.next();
+    if (parseFloat(row['Ctr']) < ctrThrsh) {
+      addToMultiMap(negativeKeywords, row['AdGroupId'], row['Query']);
+      allAdGroupIds[row['AdGroupId']] = true;
+    } else if (parseFloat(row['CostPerConversion']) < costPerConvThrsh) {
+      addToMultiMap(positiveKeywords, row['AdGroupId'], row['Query']);
+      allAdGroupIds[row['AdGroupId']] = true;
+    }
+  }
+
+  // Copy all the adGroupIds from the object into an array.
+  var adGroupIdList = [];
+  for (var adGroupId in allAdGroupIds) {
+    adGroupIdList.push(adGroupId);
+  }
+
+  // Add the keywords as negative or positive to the applicable ad groups.
+  var adGroups = AdsApp.adGroups().withIds(adGroupIdList).get();
+  while (adGroups.hasNext()) {
+    var adGroup = adGroups.next();
+    var adGroupId = adGroup.getId();
+    if (negativeKeywords[adGroupId]) {
+      for (var i = 0; i < negativeKeywords[adGroupId].length; i++) {
+        var curNegativeKeyword = '[' + negativeKeywords[adGroupId][i] + ']';
+        adGroup.createNegativeKeyword(curNegativeKeyword);
+        Logger.log('Update adGroup "%s": add negative keyword "%s".',
+                   adGroupId, curNegativeKeyword);
+      }
+    }
+    if (positiveKeywords[adGroupId]) {
+      for (var i = 0; i < positiveKeywords[adGroupId].length; i++) {
+        var curPositiveKeyword = '[' + positiveKeywords[adGroupId][i] + ']';
+        var keywordOperation = adGroup.newKeywordBuilder()
+            .withText(curPositiveKeyword)
+            .build();
+        Logger.log('Update adGroup "%s": add positive keyword "%s".',
+                   adGroupId, curPositiveKeyword);
+      }
+    }
+  }
+}
+
+// Helper function that stores queries with AdGroupId
+function addToMultiMap(map, key, value) {
+  if (!map[key]) {
+    map[key] = [];
+  }
+  map[key].push(value);
+}
+
+/**
+ * Validates the provided spreadsheet URL to make sure that it's set up
+ * properly. Throws a descriptive error message if validation fails.
+ *
+ * @param {string} spreadsheeturl The URL of the spreadsheet to open.
+ * @return {Spreadsheet} The spreadsheet object itself, fetched from the URL.
+ * @throws {Error} If the spreadsheet URL hasn't been set
+ */
+function validateAndGetSpreadsheet(spreadsheeturl) {
+  if (spreadsheeturl == 'YOUR_SPREADSHEET_URL') {
+    throw new Error('Please specify a valid Spreadsheet URL. You can find' +
+        ' a link to a template in the associated guide for this script.');
+  }
+  return SpreadsheetApp.openByUrl(spreadsheeturl);
+}
+
+
