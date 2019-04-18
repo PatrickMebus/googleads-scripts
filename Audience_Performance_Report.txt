@@ -1,0 +1,27 @@
+//Add your attributes and KPIS from here: https://developers.google.com/adwords/api/docs/appendix/reports/audience-performance-report
+
+var QUERIES = [{'query' : 'SELECT AccountDescriptiveName, CampaignName, AdGroupName, AdGroupName, Criteria, Cost,  Impressions, Clicks ' +
+    			'FROM   AUDIENCE_PERFORMANCE_REPORT ' +
+    			'DURING YESTERDAY',
+                'spreadsheetUrl' : 'add your spreadsheets URL',
+                'tabName' : 'add tab name',
+                'reportVersion' : 'v201809'
+               },
+            
+              ];
+
+
+function main() {
+  for(var i in QUERIES) {
+    var queryObject = QUERIES[i];
+    var query = queryObject.query;
+    var spreadsheetUrl = queryObject.spreadsheetUrl;
+    var tabName = queryObject.tabName;
+    var reportVersion = queryObject.reportVersion;
+    //Logger.log(spreadsheetUrl + " " + query);
+    var spreadsheet = SpreadsheetApp.openByUrl(spreadsheetUrl);
+    var sheet = spreadsheet.getSheetByName(tabName);
+    var report = AdWordsApp.report(query, {apiVersion: reportVersion});
+    report.exportToSheet(sheet);
+  }
+}
