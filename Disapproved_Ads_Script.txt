@@ -1,0 +1,223 @@
+var LABEL = 'Disapproved Ads Checked';
+
+function main() {
+
+  var accountIter = MccApp.accounts()
+    .withCondition("LabelNames DOES_NOT_CONTAIN '" + LABEL + "'")
+    .withLimit(50)
+    .get();
+  // Add them to a list for the executeInParallel later
+  var accountList = [];
+  while (accountIter.hasNext()) {
+    var account = accountIter.next();
+    account.applyLabel(LABEL);
+    accountList.push(account.getCustomerId());
+  }
+  // If there are unprocessed accounts, process them
+  if (accountList.length > 0) {
+    MccApp.accounts()
+      .withIds(accountList)
+      .executeInParallel('checkAdDisapprovalReasons', 'reportResults');
+  }
+}
+
+var SCRIPT_NAME = 'Disapproved Ads Checker';
+var NOTIFY = ['your_email@example.com'];
+var SPREADSHEET_PREFIX = 'AdWords-DisapprovedAds-';
+
+function checkAdDisapprovalReasons() {
+  Logger.log('Processing account: ' + AdWordsApp.currentAccount().getName());
+  var adIter = AdWordsApp.ads().withCondition('CampaignStatus = ENABLED')
+    .withCondition('AdGroupStatus = ENABLED')
+    .withCondition('Status = ENABLED')
+    .withCondition('ApprovalStatus = DISAPPROVED')
+    .get();
+  var results = [];
+  while (adIter.hasNext()) {
+    var ad = adIter.next();
+    results.push({
+      camp: ad.getCampaign().getName(),
+      ag: ad.getAdGroup().getName(),
+      headline: ad.getHeadline(),
+      desc1: ad.getDescription1(),
+      desc2: ad.getDescription2(),
+      displayUrl: ad.getDisplayUrl(),
+      destUrl: (ad.getDestinationUrl()) ? ad.getDestinationUrl() : '',
+      disapprovalReasons: ad.getDisapprovalReasons().join('. ')
+    });
+  }
+  return JSON.stringify({
+    accountId: AdWordsApp.currentAccount().getCustomerId(),
+    accountName: AdWordsApp.currentAccount().getName(),
+    disapprovedAdsCount: results.length,
+    disapprovedAds: results
+  });
+}
+
+function reportResults(responses) {
+
+  var summaryEmailData = [];
+  var dateTimeStr = Utilities.formatDate(new Date(), AdWordsApp.currentAccount().getTimeZone(), 'yyyy-MM-dd HH:m:s');
+  var spreadsheetName = SPREADSHEET_PREFIX + ' - ' + dateTimeStr;
+  for (var i in responses) {
+    if (!responses[i].getReturnValue()) {
+      continue;
+    }
+    var res = JSON.parse(responses[i].getReturnValue());
+    var sheetUrl = writeResultsToSpreadsheet(res, spreadsheetName);
+    summaryEmailData.push({
+      accountId: res.accountId,
+      accountName: res.accountName,
+      disapprovedAdsCount: res.disapprovedAdsCount,
+      sheetUrl: sheetUrl
+    });
+    accountsList[indexMap[res.accountId]].lastChecked = dateTimeStr;
+  }
+  if (summaryEmailData.length > 0) {
+    sendSummaryEmail(summaryEmailData);
+  }
+}
+
+//This function builds the summary email and sends it to the people in
+//the NOTIFY list
+function sendSummaryEmail(summaryEmailData) {
+  var subject = SCRIPT_NAME + ' Summary Results';
+  var body = subject;
+  var htmlBody = '<html><body>' + subject;
+  htmlBody += '<br/ ><br/ >';
+  htmlBody += '<table border="1" width="95%" style="border-collapse:collapse;">';
+  htmlBody += '<tr>';
+  htmlBody += '<td align="left"><b>Acct Id</b></td>';
+  htmlBody += '<td align="left"><b>Acct Name</b></td>';
+  htmlBody += '<td align="center"><b>Disapproved Ads Found</b></td>';
+  htmlBody += '<td align="center"><b>Full Report</b></td>';
+  htmlBody += '</tr>';
+  for (var i in summaryEmailData) {
+    var row = summaryEmailData[i];
+    htmlBody += '<tr><td align="left">' + row.accountId +
+      '</td><td align="left">' + row.accountName +
+      '</td><td align="center">' + row.disapprovedAdsCount +
+      '</td><td align="left"><a href="' + row.sheetUrl + '">' + 'Show Details' +
+      '</a></td></tr>';
+  }
+  htmlBody += '</table>';
+  htmlBody += '<br/ >';
+  htmlBody += Utilities.formatDate(new Date(), AdWordsApp.currentAccount().getTimeZone(), 'MMMM dd, yyyy @ hh:mma z');
+  htmlBody += '.  Completed. ' + Object.keys(summaryEmailData).length + ' Accounts checked.<br/ >';
+  htmlBody += 'Powered by <a href="http://www.freeadwordsscripts.com">FreeAdWordsScripts.com</a>.';
+  htmlBody += '</body></html>';
+  var options = {
+    htmlBody: htmlBody
+  };
+  for (var i in NOTIFY) {
+    MailApp.sendEmail(NOTIFY[i], subject, body, options);
+  }
+}
+
+function writeResultsToSpreadsheet(res, name) {
+  var file = getFile(name, true);
+  var spreadsheet;
+  var maxRetries = 3;
+  while (maxRetries > 0) {
+    try {
+      spreadsheet = SpreadsheetApp.openById(file.getId());
+      break;
+    } catch (e) {
+      maxRetries--;
+      Utilities.sleep(1000);
+    }
+  }
+  if (!spreadsheet) {
+    throw 'Could not open file: ' + name;
+  }
+  if (spreadsheet.getSheetByName('Sheet1')) {
+    spreadsheet.getSheetByName('Sheet1').setName(res.accountId);
+  }
+  var sheet = spreadsheet.getSheetByName(res.accountId);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(res.accountId, spreadsheet.getSheets().length);
+  }
+  var toWrite = [
+    ['Disapproval Reasons', 'Campaign', 'AdGroup', 'Headline', 'Description 1', 'Description 2', 'Display Url', 'Destination Url']
+  ];
+  for (var i in res.disapprovedAds) {
+    var row = res.disapprovedAds[i];
+    toWrite.push([row.disapprovalReasons,
+      row.camp,
+      row.ag,
+      row.headline,
+      row.desc1,
+      row.desc2,
+      row.displayUrl,
+      row.destUrl
+    ]);
+  }
+  var lastRow = sheet.getLastRow();
+  var numRows = sheet.getMaxRows();
+  if ((numRows - lastRow) < toWrite.length) {
+    sheet.insertRowsAfter(lastRow, toWrite.length - numRows + lastRow);
+  }
+  var range = sheet.getRange(lastRow + 1, 1, toWrite.length, toWrite[0].length);
+  range.setValues(toWrite);
+  if ((sheet.getMaxColumns() - sheet.getLastColumn()) > 0) {
+    sheet.deleteColumns(sheet.getLastColumn() + 1, sheet.getMaxColumns() - sheet.getLastColumn());
+  }
+  file = DriveApp.getFileById(spreadsheet.getId());
+  try {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (e) {
+    file.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW);
+  }
+  //This gives you a link directly to the spreadsheet sheet.
+  return (spreadsheet.getUrl() + '#gid=' + sheet.getSheetId());
+}
+
+
+//This function quickly writes the url data to a file
+//that can be loaded again for the next run
+function writeJSONFile(fileName, toWrite) {
+  var file = getFile(fileName, false);
+  file.setContent(JSON.stringify(toWrite));
+}
+
+//And this loads that stored file and converts it to an object
+function readJSONFile(fileName) {
+  var file = getFile(fileName, false);
+  var fileData = file.getBlob().getDataAsString();
+  if (fileData) {
+    return JSON.parse(fileData);
+  } else {
+    return null;
+  }
+}
+
+//This function finds a given file on Google Drive
+//If it does not exist, it creates a new file
+//if isSpreadsheet is set, it will create a new spreadsheet
+//otherwise, it creates a text file.
+function getFile(fileName, isSpreadsheet) {
+  var maxRetries = 3;
+  var errors = [];
+  while (maxRetries > 0) {
+    try {
+      var fileIter = DriveApp.getFilesByName(fileName);
+      if (!fileIter.hasNext()) {
+        Logger.log('Could not find file: ' + fileName + ' on Google Drive. Creating new file.');
+        if (isSpreadsheet) {
+          return SpreadsheetApp.create(fileName);
+        } else {
+          return DriveApp.createFile(fileName, '');
+        }
+      } else {
+        return fileIter.next();
+      }
+    } catch (e) {
+      errors.push(e);
+      maxRetries--;
+      Utilities.sleep(1000);
+    }
+  }
+  if (maxRetries === 0) {
+    throw errors.join('. ');
+  }
+}
