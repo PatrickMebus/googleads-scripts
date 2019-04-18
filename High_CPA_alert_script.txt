@@ -1,0 +1,24 @@
+function main(){ 
+  var cpalimit = 100; 
+  var emailaddress = "add your e-mail here"; 
+  var timerange = "LAST_7_DAYS"
+
+  var numcampaigns=0; 
+  var campaignNames =[]; 
+  var campaignIterator = AdWordsApp.campaigns() 
+  	.forDateRange("TODAY") 
+  	.withCondition("Status = ACTIVE") 
+  	.get(); 
+  while (campaignIterator.hasNext()) { 
+	var campaign = campaignIterator.next(); 
+	var name = campaign.getName(); 
+	var stats = campaign.getStatsFor(timerange); 
+	var Conv = stats.getConversions(); 
+	var Cost = stats.getCost(); 
+	var cpa = (Cost /Conv); 
+
+	if(Conv>0){ 
+  	if(cpa>cpalimit){ 
+    	campaignNames.push(name); 
+  	} 
+	}  
